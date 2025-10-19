@@ -24,6 +24,17 @@ export default function Page() {
   const [loading, setLoading] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [files, setFiles] = useState<ListedFile[]>([]);
+  const pollingTimers = useRef<Record<string, number>>({});
+  const { startPollingFile } = useFilePolling(setFiles, pollingTimers);
+
+  // Clear any active polling intervals on unmount/navigation
+  useEffect(() => {
+    return () => {
+      const timers = Object.values(pollingTimers.current);
+      for (const timerId of timers) clearInterval(timerId);
+      pollingTimers.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -32,9 +43,10 @@ export default function Page() {
       if (res.ok && json.vector_store_id)
         setVectorStoreId(json.vector_store_id);
       // Load files list after store exists
-      const fr = await fetch('/api/openai-vs/files');
-      const fj = await fr.json();
-      if (fr.ok && Array.isArray(fj.files)) setFiles(fj.files);
+      const filesResponse = await fetch('/api/openai-vs/files');
+      const filesJson = await filesResponse.json();
+      if (filesResponse.ok && Array.isArray(filesJson.files))
+        setFiles(filesJson.files);
     })();
   }, []);
 
@@ -53,23 +65,30 @@ export default function Page() {
     setIngestMsg('Uploading…');
     const fd = new FormData();
     fd.append('file', file);
-    const res = await fetch('/api/openai-vs/ingest', {
+    const ingestResponse = await fetch('/api/openai-vs/ingest', {
       method: 'POST',
       body: fd,
     });
-    const json = await res.json();
-    if (res.ok) {
+    const ingestJson = await ingestResponse.json();
+    if (ingestResponse.ok) {
       setIngestMsg(
-        `Attached ${json.file_name} to store ${json.vector_store_id}`
+        `Attached ${ingestJson.file_name} to store ${ingestJson.vector_store_id}`
       );
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      // refresh files list
-      const fr = await fetch('/api/openai-vs/files');
-      const fj = await fr.json();
-      if (fr.ok && Array.isArray(fj.files)) setFiles(fj.files);
+      // Add an optimistic entry and start polling this file's status
+      setFiles((prev) => [
+        {
+          id: ingestJson.file_id,
+          filename: ingestJson.file_name,
+          status: 'in_progress',
+          created_at: Date.now() / 1000,
+        },
+        ...prev,
+      ]);
+      startPollingFile(ingestJson.file_id);
     } else {
-      setIngestMsg(`Error: ${json.error || 'ingest failed'}`);
+      setIngestMsg(`Error: ${ingestJson.error || 'ingest failed'}`);
     }
   }
 
@@ -138,14 +157,24 @@ export default function Page() {
           <div className="whitespace-pre-wrap border rounded p-3">
             {result.answer || '(no text)'}
           </div>
-          {result.citations?.length ? (
+          {'citations_summary' in result &&
+          (result as any).citations_summary?.length ? (
             <div>
               <h3 className="font-medium mt-2">Citations</h3>
-              <ul className="list-disc pl-6 text-sm">
-                {result.citations.map((c, i) => (
+              <ul className="list-disc text-sm">
+                {(result as any).citations_summary.map((c: any, i: number) => (
                   <li key={i}>
-                    {c.file_id}
-                    {c.quote ? ` – "${c.quote}"` : ''}
+                    <span className="font-medium">{c.filename}</span>
+                    <span className="ml-2 text-gray-500">× {c.count}</span>
+                    {c.quotes?.length ? (
+                      <ul className="list-disc pl-6 text-gray-600">
+                        {c.quotes.map((q: string, qi: number) => (
+                          <li key={qi}>
+                            <span className="italic">“{q}”</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -159,11 +188,23 @@ export default function Page() {
         {!files.length ? (
           <p className="text-sm text-gray-500">No files yet</p>
         ) : (
-          <ul className="list-disc pl-6 text-sm">
-            {files.map((f) => (
-              <li key={f.id} className="flex items-center justify-between">
-                <span>{f.filename || f.id}</span>
-                <span className="text-gray-500">{f.status || ''}</span>
+          <ul className="list-disc text-sm">
+            {files.map((fileItem) => (
+              <li
+                key={fileItem.id}
+                className="flex items-center justify-between"
+              >
+                <span>
+                  {fileItem.filename || fileItem.id}
+                  {fileItem.created_at ? (
+                    <span className="ml-2 text-gray-500">
+                      {new Date(
+                        (fileItem.created_at || 0) * 1000
+                      ).toLocaleString()}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-gray-500">{fileItem.status || ''}</span>
               </li>
             ))}
           </ul>
@@ -171,4 +212,59 @@ export default function Page() {
       </div>
     </div>
   );
+}
+
+function useFilePolling(
+  setFiles: React.Dispatch<React.SetStateAction<ListedFile[]>>,
+  timersRef: React.MutableRefObject<Record<string, number>>
+) {
+  return {
+    startPollingFile: (fileId: string) => {
+      if (timersRef.current[fileId]) return; // already polling
+      let attempts = 0;
+      const poll = async () => {
+        attempts += 1;
+        try {
+          const statusResponse = await fetch(`/api/openai-vs/files/${fileId}`, {
+            cache: 'no-store',
+          });
+          if (statusResponse.ok) {
+            const statusJson = await statusResponse.json();
+            // write status changes to state
+            setFiles((prev) =>
+              prev.map((fileItem) =>
+                fileItem.id === fileId
+                  ? {
+                      ...fileItem,
+                      status: statusJson.status ?? fileItem.status,
+                      filename: statusJson.filename ?? fileItem.filename,
+                      created_at: statusJson.created_at ?? fileItem.created_at,
+                    }
+                  : fileItem
+              )
+            );
+            if (
+              statusJson.status === 'completed' ||
+              statusJson.status === 'failed' ||
+              statusJson.status === 'cancelled'
+            ) {
+              clearInterval(timersRef.current[fileId]);
+              delete timersRef.current[fileId];
+              return;
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to poll file ${fileId}`, error);
+        }
+        if (attempts >= 120) {
+          // ~4 minutes at 2s interval
+          clearInterval(timersRef.current[fileId]);
+          delete timersRef.current[fileId];
+        }
+      };
+      const id = window.setInterval(poll, 2000);
+      timersRef.current[fileId] = id;
+      void poll();
+    },
+  };
 }

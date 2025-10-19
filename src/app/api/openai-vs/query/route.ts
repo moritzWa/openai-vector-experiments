@@ -16,36 +16,6 @@ type ResponseLike = {
   output_text?: string | null;
 };
 
-function extractAnswerAndCitations(response: ResponseLike): {
-  answer: string;
-  citations: Array<{ file_id: string; quote?: string }>;
-} {
-  const outputs = response.output ?? [];
-  const answerParts: string[] = [];
-  const citations: Array<{ file_id: string; quote?: string }> = [];
-  for (const output of outputs) {
-    const content = output?.content ?? [];
-    for (const contentItem of content) {
-      if (contentItem?.type === 'output_text') {
-        const t = contentItem?.text as { value?: string } | string | undefined;
-        const value = typeof t === 'string' ? t : t?.value ?? '';
-        if (value) answerParts.push(value);
-      }
-      const annotations = contentItem?.annotations ?? [];
-      for (const annotation of annotations) {
-        if (annotation?.type === 'file_citation' && annotation?.file_id) {
-          citations.push({
-            file_id: annotation.file_id,
-            quote: annotation?.quote,
-          });
-        }
-      }
-    }
-  }
-  const answer = answerParts.join('') || response.output_text || '';
-  return { answer, citations };
-}
-
 async function readStoreFile() {
   try {
     const raw = await fs.readFile(DATA_PATH, 'utf8');
@@ -83,9 +53,53 @@ export async function POST(req: Request) {
     tools: [{ type: 'file_search', vector_store_ids: [vector_store_id] }],
   });
 
-  const { answer, citations } = extractAnswerAndCitations(
-    response as ResponseLike
+  // Single-pass extraction and aggregation
+  const resp = response as ResponseLike;
+  const outputs = resp.output ?? [];
+  const answerParts: string[] = [];
+  const byFile = new Map<string, { count: number }>();
+  const uniqueIds = new Set<string>();
+
+  for (const output of outputs) {
+    const content = output?.content ?? [];
+    for (const contentItem of content) {
+      if (contentItem?.type === 'output_text') {
+        const t = contentItem?.text as { value?: string } | string | undefined;
+        const value = typeof t === 'string' ? t : t?.value ?? '';
+        if (value) answerParts.push(value);
+      }
+      const annotations = contentItem?.annotations ?? [];
+      for (const annotation of annotations) {
+        console.log('annotation in loop:', annotation);
+
+        if (annotation?.type === 'file_citation' && annotation?.file_id) {
+          uniqueIds.add(annotation.file_id);
+          const entry = byFile.get(annotation.file_id) ?? { count: 0 };
+          entry.count += 1;
+          byFile.set(annotation.file_id, entry);
+        }
+      }
+    }
+  }
+
+  const answer = answerParts.join('') || resp.output_text || '';
+
+  // Resolve filenames once per unique file ID
+  const idToName: Record<string, string> = {};
+  await Promise.all(
+    Array.from(uniqueIds).map(async (id) => {
+      try {
+        const file = await client.files.retrieve(id);
+        idToName[id] = file.filename;
+      } catch {}
+    })
   );
 
-  return NextResponse.json({ answer, citations, vector_store_id });
+  const citations_summary = Array.from(byFile, ([file_id, v]) => ({
+    file_id,
+    filename: idToName[file_id] ?? file_id,
+    count: v.count,
+  })).sort((a, b) => b.count - a.count);
+
+  return NextResponse.json({ answer, citations_summary, vector_store_id });
 }
