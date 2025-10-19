@@ -111,14 +111,64 @@ export default function Page() {
     if (!canQuery) return;
     setLoading(true);
     setResult(null);
-    const res = await fetch('/api/openai-vs/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-    });
-    const json = await res.json();
-    setLoading(false);
-    if (res.ok) setResult(json);
+    // Streaming via unified SSE route
+    let answerText = '';
+    // Use fetch to POST and read the SSE stream from the body
+    try {
+      const res = await fetch('/api/openai-vs/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      if (!res.body) {
+        const json = await res.json();
+        setResult(json);
+        setLoading(false);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split(/\n\n/).filter(Boolean);
+        for (const line of lines) {
+          const noPrefix = line.startsWith('data:') ? line.slice(5) : line;
+          try {
+            const msg = JSON.parse(noPrefix);
+            if (msg.type === 'text') {
+              answerText += msg.delta;
+              setResult(
+                (prev) =>
+                  ({
+                    ...(prev || {
+                      answer: '',
+                      vector_store_id: '',
+                      citations_summary: [] as any,
+                    }),
+                    answer: answerText,
+                  } as any)
+              );
+            } else if (msg.type === 'summary') {
+              setResult(
+                (prev) =>
+                  ({
+                    ...(prev || {
+                      answer: answerText,
+                      vector_store_id: '',
+                      citations_summary: [],
+                    }),
+                    citations_summary: msg.citations_summary,
+                  } as any)
+              );
+            }
+          } catch {}
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
