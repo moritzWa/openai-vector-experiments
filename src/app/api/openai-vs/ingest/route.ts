@@ -24,25 +24,31 @@ export async function POST(req: Request) {
     );
 
   const form = await req.formData();
-  const file = form.get('file');
-  if (!(file instanceof File))
-    return NextResponse.json({ error: 'Missing file' }, { status: 400 });
+  let files = form.getAll('files').filter((f): f is File => f instanceof File);
+  if (files.length === 0) {
+    files = form.getAll('file').filter((f): f is File => f instanceof File);
+  }
+  if (files.length === 0)
+    return NextResponse.json({ error: 'Missing file(s)' }, { status: 400 });
 
-  const bytes = await file.arrayBuffer();
-  const buffer = Buffer.from(bytes);
-
-  const uploaded = await client.files.create({
-    file: new File([buffer], file.name, { type: file.type || 'text/markdown' }),
-    purpose: 'assistants',
-  });
-
-  await client.vectorStores.files.create(vector_store_id, {
-    file_id: uploaded.id,
-  });
+  const results: Array<{ file_id: string; file_name: string }> = [];
+  for (const file of files) {
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
+    const uploaded = await client.files.create({
+      file: new File([buffer], file.name, {
+        type: file.type || 'text/markdown',
+      }),
+      purpose: 'assistants',
+    });
+    await client.vectorStores.files.create(vector_store_id, {
+      file_id: uploaded.id,
+    });
+    results.push({ file_id: uploaded.id, file_name: file.name });
+  }
 
   return NextResponse.json({
-    file_id: uploaded.id,
-    file_name: file.name,
+    files: results,
     vector_store_id,
   });
 }

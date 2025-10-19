@@ -1,6 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Card } from '@/components/ui/card';
 
 type QueryResult = {
   answer: string;
@@ -26,6 +30,8 @@ export default function Page() {
   const [files, setFiles] = useState<ListedFile[]>([]);
   const pollingTimers = useRef<Record<string, number>>({});
   const { startPollingFile } = useFilePolling(setFiles, pollingTimers);
+  const [selectionLabel, setSelectionLabel] =
+    useState<string>('No file chosen');
 
   // Clear any active polling intervals on unmount/navigation
   useEffect(() => {
@@ -63,30 +69,38 @@ export default function Page() {
     e.preventDefault();
     if (!file || !vectorStoreId) return;
     setIngestMsg('Uploading…');
-    const fd = new FormData();
-    fd.append('file', file);
+    const formData = new FormData();
+    // Support multiple selections; append as 'files'
+    const inputEl = fileInputRef.current;
+    if (inputEl?.files && inputEl.files.length > 0) {
+      for (const file of Array.from(inputEl.files))
+        formData.append('files', file);
+    } else if (file) {
+      formData.append('files', file);
+    }
     const ingestResponse = await fetch('/api/openai-vs/ingest', {
       method: 'POST',
-      body: fd,
+      body: formData,
     });
     const ingestJson = await ingestResponse.json();
     if (ingestResponse.ok) {
+      const uploaded = Array.isArray(ingestJson.files) ? ingestJson.files : [];
       setIngestMsg(
-        `Attached ${ingestJson.file_name} to store ${ingestJson.vector_store_id}`
+        `Attached ${uploaded.length} file(s) to store ${ingestJson.vector_store_id}`
       );
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      // Add an optimistic entry and start polling this file's status
+      // Add optimistic entries for all files and start polling each
       setFiles((prev) => [
-        {
-          id: ingestJson.file_id,
-          filename: ingestJson.file_name,
+        ...uploaded.map((u: any) => ({
+          id: u.file_id,
+          filename: u.file_name,
           status: 'in_progress',
           created_at: Date.now() / 1000,
-        },
+        })),
         ...prev,
       ]);
-      startPollingFile(ingestJson.file_id);
+      uploaded.forEach((u: any) => startPollingFile(u.file_id));
     } else {
       setIngestMsg(`Error: ${ingestJson.error || 'ingest failed'}`);
     }
@@ -120,43 +134,57 @@ export default function Page() {
 
       <form onSubmit={onIngest} className="space-y-3">
         <div className="flex items-center gap-3">
+          {/* Visually hide the native input; trigger via the button */}
           <input
             ref={fileInputRef}
             type="file"
             accept=".md,text/markdown"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setFile(f);
+              const all = e.target.files ? Array.from(e.target.files) : [];
+              if (all.length === 0) setSelectionLabel('No file chosen');
+              else if (all.length === 1) setSelectionLabel(all[0].name);
+              else setSelectionLabel(`${all.length} files selected`);
+            }}
           />
-          <button
-            disabled={!canIngest}
-            className="rounded bg-black text-white px-3 py-2 disabled:opacity-50"
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => fileInputRef.current?.click()}
           >
+            Choose files
+          </Button>
+          <div className="h-10 flex items-center rounded-md border border-input bg-background px-3 text-sm text-muted-foreground min-w-[240px]">
+            {selectionLabel}
+          </div>
+          <Button disabled={!canIngest} type="submit">
             Upload Markdown
-          </button>
+          </Button>
         </div>
         {ingestMsg && <p className="text-sm text-gray-600">{ingestMsg}</p>}
       </form>
 
       <form onSubmit={onSearch} className="space-y-3">
-        <input
+        <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Ask a question about your uploaded file…"
-          className="w-full border rounded px-3 py-2"
+          className="w-full"
         />
-        <button
-          disabled={!canQuery || loading}
-          className="rounded bg-black text-white px-3 py-2 disabled:opacity-50"
-        >
+        <Button disabled={!canQuery || loading} type="submit">
           {loading ? 'Searching…' : 'Search'}
-        </button>
+        </Button>
       </form>
 
       {result && (
         <div className="space-y-2">
           <h2 className="text-lg font-medium">Answer</h2>
-          <div className="whitespace-pre-wrap border rounded p-3">
+          <Card className="whitespace-pre-wrap p-3">
             {result.answer || '(no text)'}
-          </div>
+          </Card>
           {'citations_summary' in result &&
           (result as any).citations_summary?.length ? (
             <div>
@@ -165,7 +193,9 @@ export default function Page() {
                 {(result as any).citations_summary.map((c: any, i: number) => (
                   <li key={i}>
                     <span className="font-medium">{c.filename}</span>
-                    <span className="ml-2 text-gray-500">× {c.count}</span>
+                    <Badge variant="secondary" className="ml-2">
+                      × {c.count}
+                    </Badge>
                     {c.quotes?.length ? (
                       <ul className="list-disc pl-6 text-gray-600">
                         {c.quotes.map((q: string, qi: number) => (
@@ -192,7 +222,7 @@ export default function Page() {
             {files.map((fileItem) => (
               <li
                 key={fileItem.id}
-                className="flex items-center justify-between"
+                className="flex pb-2 items-center justify-between"
               >
                 <span>
                   {fileItem.filename || fileItem.id}
@@ -204,7 +234,17 @@ export default function Page() {
                     </span>
                   ) : null}
                 </span>
-                <span className="text-gray-500">{fileItem.status || ''}</span>
+                <Badge
+                  variant={
+                    fileItem.status === 'completed'
+                      ? 'secondary'
+                      : fileItem.status === 'failed'
+                      ? 'destructive'
+                      : 'secondary'
+                  }
+                >
+                  {fileItem.status || ''}
+                </Badge>
               </li>
             ))}
           </ul>
