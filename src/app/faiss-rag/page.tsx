@@ -46,8 +46,11 @@ export default function Page() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [stats, setStats] = useState<DocumentsResponse['stats'] | null>(null);
-  const [selectionLabel, setSelectionLabel] = useState<string>('No file chosen');
-  const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set());
+  const [selectionLabel, setSelectionLabel] =
+    useState<string>('No file chosen');
+  const [expandedSources, setExpandedSources] = useState<Set<number>>(
+    new Set()
+  );
 
   // Load documents on mount
   useEffect(() => {
@@ -111,7 +114,9 @@ export default function Page() {
         setIngestMsg(`Error: ${json.error || 'Upload failed'}`);
       }
     } catch (error) {
-      setIngestMsg(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setIngestMsg(
+        `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
@@ -149,19 +154,31 @@ export default function Page() {
         const lines = chunk.split(/\n\n/).filter(Boolean);
 
         for (const line of lines) {
-          const noPrefix = line.startsWith('data:') ? line.slice(5).trim() : line;
+          const noPrefix = line.startsWith('data:')
+            ? line.slice(5).trim()
+            : line;
           try {
             const msg = JSON.parse(noPrefix);
 
             if (msg.type === 'text') {
               answerText += msg.delta;
               setResult((prev) => ({
-                ...(prev || { query, answer: '', sources: [], usage: { embeddingTokens: 0, completionTokens: 0 } }),
+                ...(prev || {
+                  query,
+                  answer: '',
+                  sources: [],
+                  usage: { embeddingTokens: 0, completionTokens: 0 },
+                }),
                 answer: answerText,
               }));
             } else if (msg.type === 'sources') {
               setResult((prev) => ({
-                ...(prev || { query, answer: answerText, sources: [], usage: { embeddingTokens: 0, completionTokens: 0 } }),
+                ...(prev || {
+                  query,
+                  answer: answerText,
+                  sources: [],
+                  usage: { embeddingTokens: 0, completionTokens: 0 },
+                }),
                 sources: msg.sources,
               }));
             }
@@ -171,7 +188,9 @@ export default function Page() {
         }
       }
     } catch (error) {
-      setIngestMsg(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setIngestMsg(
+        `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     } finally {
       setLoading(false);
     }
@@ -180,9 +199,7 @@ export default function Page() {
   return (
     <div className="mx-auto max-w-3xl p-6 space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold">
-          FAISS + SQLite RAG (demo)
-        </h1>
+        <h1 className="text-2xl font-semibold">FAISS + SQLite RAG (demo)</h1>
         <p className="text-sm text-gray-500">
           Vector similarity search with local storage
         </p>
@@ -245,14 +262,18 @@ export default function Page() {
 
           {result.sources && result.sources.length > 0 && (
             <div>
-              <h3 className="font-medium mb-2">Sources ({result.sources.length})</h3>
+              <h3 className="font-medium mb-2">
+                Sources ({result.sources.length})
+              </h3>
               <div className="space-y-2">
                 {result.sources.map((source, i) => {
                   const isExpanded = expandedSources.has(i);
                   return (
                     <Card key={i} className="p-3 text-sm">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="font-medium">{source.documentName}</span>
+                        <span className="font-medium">
+                          {source.documentName}
+                        </span>
                         <div className="flex gap-2 items-center">
                           <Badge variant="secondary">
                             Chunk {source.chunkIndex}
@@ -299,7 +320,8 @@ export default function Page() {
 
           {result.usage && (
             <div className="text-xs text-gray-500">
-              Tokens used: {result.usage.embeddingTokens} (embedding) + {result.usage.completionTokens} (completion)
+              Tokens used: {result.usage.embeddingTokens} (embedding) +{' '}
+              {result.usage.completionTokens} (completion)
             </div>
           )}
         </div>
@@ -310,7 +332,8 @@ export default function Page() {
           <h2 className="text-lg font-medium">Uploaded Documents</h2>
           {stats && (
             <div className="text-sm text-gray-500">
-              {stats.totalDocuments} docs, {stats.totalChunks} chunks, {stats.totalVectors} vectors
+              {stats.totalDocuments} docs, {stats.totalChunks} chunks,{' '}
+              {stats.totalVectors} vectors
             </div>
           )}
         </div>

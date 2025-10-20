@@ -13,7 +13,7 @@ export async function POST(req: Request) {
 
     // Parse request body
     const body = await req.json();
-    const { query, topK = 5 } = body;
+    const { query, topK = 25 } = body;
 
     if (!query || typeof query !== 'string') {
       return NextResponse.json(
