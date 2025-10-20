@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { encodeSSE, SSE_HEADERS } from '@/lib/sse';
 
 const DATA_PATH = path.resolve(process.cwd(), 'data/openai-vs.json');
 
@@ -44,26 +45,17 @@ export async function POST(req: Request) {
     stream: true,
   });
 
-  const encoder = new TextEncoder();
   const bodyStream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
         for await (const event of stream) {
           if ((event as any).type === 'response.output_text.delta') {
             const delta = (event as any).delta as string;
-            controller.enqueue(
-              encoder.encode(
-                `data:${JSON.stringify({ type: 'text', delta })}\n\n`
-              )
-            );
+            controller.enqueue(encodeSSE('text', { delta }));
           }
           if ((event as any).type === 'response.error') {
             const err = (event as any).error?.message || 'error';
-            controller.enqueue(
-              encoder.encode(
-                `data:${JSON.stringify({ type: 'error', error: err })}\n\n`
-              )
-            );
+            controller.enqueue(encodeSSE('error', { error: err }));
           }
         }
 
@@ -101,35 +93,18 @@ export async function POST(req: Request) {
         })).sort((a, b) => b.count - a.count);
 
         controller.enqueue(
-          encoder.encode(
-            `data:${JSON.stringify({
-              type: 'summary',
-              citations_summary,
-              vector_store_id,
-            })}\n\n`
-          )
+          encodeSSE('summary', { citations_summary, vector_store_id })
         );
-        controller.enqueue(encoder.encode('event:end\ndata:["end"]\n\n'));
+        controller.enqueue(new TextEncoder().encode('event:end\ndata:["end"]\n\n'));
         controller.close();
       } catch (e: any) {
         controller.enqueue(
-          encoder.encode(
-            `data:${JSON.stringify({
-              type: 'error',
-              error: String(e?.message || e),
-            })}\n\n`
-          )
+          encodeSSE('error', { error: String(e?.message || e) })
         );
         controller.close();
       }
     },
   });
 
-  return new NextResponse(bodyStream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-store',
-      Connection: 'keep-alive',
-    },
-  });
+  return new NextResponse(bodyStream, { headers: SSE_HEADERS });
 }

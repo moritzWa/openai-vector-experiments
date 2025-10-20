@@ -5,6 +5,7 @@ import {
   getChunksByIds,
   type SearchResult,
 } from '@/lib/faiss-sqlite';
+import { encodeSSE, SSE_HEADERS } from '@/lib/sse';
 
 export async function POST(req: Request) {
   try {
@@ -48,11 +49,13 @@ export async function POST(req: Request) {
     const context = searchResults
       .map(
         (result, i) =>
-          `[${i + 1}] From ${result.documentName} (chunk ${result.chunkIndex}):\n${result.text}`
+          `[${i + 1}] From ${result.documentName} (chunk ${
+            result.chunkIndex
+          }):\n${result.text}`
       )
       .join('\n\n');
 
-    // Generate response using OpenAI chat completions
+    // Generate response using OpenAI chat completions with streaming
     const systemPrompt = `You are a helpful assistant that answers questions based on the provided context.
 Use the context below to answer the user's question. If the answer cannot be found in the context, say so.
 Always cite which source number(s) you used (e.g., [1], [2]).
@@ -60,31 +63,54 @@ Always cite which source number(s) you used (e.g., [1], [2]).
 Context:
 ${context}`;
 
-    const completion = await client.chat.completions.create({
+    const stream = await client.responses.create({
       model: 'gpt-4o-mini',
-      messages: [
+      input: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: query },
       ],
       temperature: 0.7,
+      stream: true,
     });
 
-    const answer = completion.choices[0].message.content;
+    // Create a ReadableStream for SSE
+    const readableStream = new ReadableStream({
+      async start(controller) {
+        try {
+          // Stream the answer
+          for await (const event of stream) {
+            if ((event as any).type === 'response.output_text.delta') {
+              const delta = (event as any).delta as string;
+              controller.enqueue(encodeSSE('text', { delta }));
+            }
+          }
 
-    return NextResponse.json({
-      query,
-      answer,
-      sources: searchResults.map((result) => ({
-        documentName: result.documentName,
-        chunkIndex: result.chunkIndex,
-        distance: result.distance,
-        text: result.text, // Full text
-      })),
-      usage: {
-        embeddingTokens: embeddingResponse.usage.total_tokens,
-        completionTokens: completion.usage?.total_tokens || 0,
+          // Send sources at the end
+          controller.enqueue(
+            encodeSSE('sources', {
+              sources: searchResults.map((result) => ({
+                documentName: result.documentName,
+                chunkIndex: result.chunkIndex,
+                distance: result.distance,
+                text: result.text,
+              })),
+            })
+          );
+
+          controller.close();
+        } catch (error) {
+          console.error('Stream error:', error);
+          controller.enqueue(
+            encodeSSE('error', {
+              error: error instanceof Error ? error.message : String(error),
+            })
+          );
+          controller.close();
+        }
       },
     });
+
+    return new Response(readableStream, { headers: SSE_HEADERS });
   } catch (error) {
     console.error('Query error:', error);
     return NextResponse.json(

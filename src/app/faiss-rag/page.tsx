@@ -122,6 +122,8 @@ export default function Page() {
     setLoading(true);
     setResult(null);
 
+    let answerText = '';
+
     try {
       const res = await fetch('/api/faiss-rag/query', {
         method: 'POST',
@@ -129,12 +131,44 @@ export default function Page() {
         body: JSON.stringify({ query, topK: 5 }),
       });
 
-      const json = await res.json();
-
-      if (res.ok) {
+      if (!res.body) {
+        const json = await res.json();
         setResult(json);
-      } else {
-        setIngestMsg(`Query error: ${json.error || 'Unknown error'}`);
+        setLoading(false);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split(/\n\n/).filter(Boolean);
+
+        for (const line of lines) {
+          const noPrefix = line.startsWith('data:') ? line.slice(5).trim() : line;
+          try {
+            const msg = JSON.parse(noPrefix);
+
+            if (msg.type === 'text') {
+              answerText += msg.delta;
+              setResult((prev) => ({
+                ...(prev || { query, answer: '', sources: [], usage: { embeddingTokens: 0, completionTokens: 0 } }),
+                answer: answerText,
+              }));
+            } else if (msg.type === 'sources') {
+              setResult((prev) => ({
+                ...(prev || { query, answer: answerText, sources: [], usage: { embeddingTokens: 0, completionTokens: 0 } }),
+                sources: msg.sources,
+              }));
+            }
+          } catch (err) {
+            // Ignore parse errors for incomplete chunks
+          }
+        }
       }
     } catch (error) {
       setIngestMsg(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
