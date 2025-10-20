@@ -48,56 +48,65 @@ export async function POST(req: Request) {
   const bodyStream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
+        const citationsByFile = new Map<
+          string,
+          { filename: string; count: number }
+        >();
+
+        // Collect citations during streaming
         for await (const event of stream) {
-          if ((event as any).type === 'response.output_text.delta') {
+          const eventType = (event as any).type;
+
+          // Stream text deltas
+          if (eventType === 'response.output_text.delta') {
             const delta = (event as any).delta as string;
             controller.enqueue(encodeSSE('text', { delta }));
           }
-          if ((event as any).type === 'response.error') {
+
+          // Collect file citations as they're added
+          if (eventType === 'response.output_text.annotation.added') {
+            const ann = (event as any).annotation;
+
+            if (ann?.type === 'file_citation' && ann?.file_id) {
+              const existing = citationsByFile.get(ann.file_id);
+              if (existing) {
+                existing.count++;
+              } else {
+                citationsByFile.set(ann.file_id, {
+                  filename: ann.filename || ann.file_id,
+                  count: 1,
+                });
+              }
+            }
+          }
+
+          // Handle errors
+          if (eventType === 'response.error') {
             const err = (event as any).error?.message || 'error';
             controller.enqueue(encodeSSE('error', { error: err }));
           }
         }
 
-        const final = await (stream as any).finalResponse();
-
-        // Aggregate citations summary from final
-        const outputs = (final as any)?.output ?? [];
-        const byFile = new Map<string, number>();
-        const uniqueIds = new Set<string>();
-        for (const output of outputs) {
-          const content = output?.content ?? [];
-          for (const item of content) {
-            const annotations = item?.annotations ?? [];
-            for (const ann of annotations) {
-              if (ann?.type === 'file_citation' && ann?.file_id) {
-                uniqueIds.add(ann.file_id);
-                byFile.set(ann.file_id, (byFile.get(ann.file_id) || 0) + 1);
-              }
-            }
-          }
-        }
-        const idToName: Record<string, string> = {};
-        await Promise.all(
-          Array.from(uniqueIds).map(async (id) => {
-            try {
-              const file = await client.files.retrieve(id);
-              idToName[id] = file.filename;
-            } catch {}
+        // Build citations summary
+        const citations_summary = Array.from(
+          citationsByFile,
+          ([file_id, { filename, count }]) => ({
+            file_id,
+            filename,
+            count,
           })
-        );
-        const citations_summary = Array.from(byFile, ([file_id, count]) => ({
-          file_id,
-          filename: idToName[file_id] ?? file_id,
-          count,
-        })).sort((a, b) => b.count - a.count);
+        ).sort((a, b) => b.count - a.count);
 
+        // Send summary
         controller.enqueue(
           encodeSSE('summary', { citations_summary, vector_store_id })
         );
-        controller.enqueue(new TextEncoder().encode('event:end\ndata:["end"]\n\n'));
+        controller.enqueue(
+          new TextEncoder().encode('event:end\ndata:["end"]\n\n')
+        );
         controller.close();
       } catch (e: any) {
+        console.error('Stream error:', e);
         controller.enqueue(
           encodeSSE('error', { error: String(e?.message || e) })
         );
